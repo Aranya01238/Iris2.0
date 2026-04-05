@@ -1,6 +1,5 @@
 Flask
 flask-cors
-opencv-python
+opencv-python-headless
 numpy
-deepface
 setuptools
