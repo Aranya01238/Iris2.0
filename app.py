@@ -23,8 +23,13 @@ CORS(app)
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 eye_cascade  = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
 
-os.makedirs("intruder_shots", exist_ok=True)
-os.makedirs("whitelist",      exist_ok=True)
+IS_VERCEL = bool(os.getenv("VERCEL"))
+DATA_ROOT = "/tmp/iris_data" if IS_VERCEL else "."
+INTRUDER_DIR = os.path.join(DATA_ROOT, "intruder_shots")
+WHITELIST_DIR = os.path.join(DATA_ROOT, "whitelist")
+
+os.makedirs(INTRUDER_DIR, exist_ok=True)
+os.makedirs(WHITELIST_DIR, exist_ok=True)
 
 state = {
     "faces": [], "face_count": 0, "fps": 0,
@@ -91,9 +96,12 @@ camera_lock = threading.Lock()
 
 def get_camera():
     global camera
+    if IS_VERCEL:
+        return None
     with camera_lock:
         if camera is None or not camera.isOpened():
-            camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
+            camera = cv2.VideoCapture(0, backend)
             camera.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
             camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
             camera.set(cv2.CAP_PROP_FPS, 30)
@@ -139,6 +147,17 @@ def check_liveness(face_gray):
 def generate_frames():
     global latest_frame_for_emotion
     cam         = get_camera()
+    if cam is None:
+        while True:
+            frame = np.zeros((480, 854, 3), dtype=np.uint8)
+            cv2.putText(frame, "Camera not available in serverless runtime", (25, 220),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 230), 2, cv2.LINE_AA)
+            cv2.putText(frame, "Run this app locally for live webcam features", (25, 260),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80, 160, 180), 2, cv2.LINE_AA)
+            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n")
+            time.sleep(0.3)
+
     prev_time   = time.time()
     frame_count = 0
     prev_count  = -1
@@ -200,7 +219,7 @@ def generate_frames():
 
         if registering and face_count > 0:
             x,y,fw,fh = faces[0]
-            fname = f"whitelist/face_{len(os.listdir('whitelist'))}.jpg"
+            fname = os.path.join(WHITELIST_DIR, f"face_{len(os.listdir(WHITELIST_DIR))}.jpg")
             cv2.imwrite(fname, frame[y:y+fh, x:x+fw])
             with state_lock:
                 state["whitelist"].append(fname)
@@ -239,7 +258,7 @@ def generate_frames():
                     except:
                         pass
                 if len(wl) > 0 and not is_known:
-                    shot = f"intruder_shots/{fid}_{datetime.now().strftime('%H%M%S')}.jpg"
+                    shot = os.path.join(INTRUDER_DIR, f"{fid}_{datetime.now().strftime('%H%M%S')}.jpg")
                     cv2.imwrite(shot, frame[y:y+fh, x:x+fw])
                     with state_lock:
                         state["intrusion_count"] += 1
@@ -395,8 +414,8 @@ def clear_whitelist():
         state["whitelist"]    = []
         state["alarm"]        = False
         state["threat_level"] = "CLEAR"
-    shutil.rmtree("whitelist", ignore_errors=True)
-    os.makedirs("whitelist", exist_ok=True)
+    shutil.rmtree(WHITELIST_DIR, ignore_errors=True)
+    os.makedirs(WHITELIST_DIR, exist_ok=True)
     log_event("WHITELIST CLEARED", "info")
     return jsonify({"ok": True})
 
@@ -412,6 +431,8 @@ def set_timeout():
 @app.route("/api/snapshot", methods=["POST"])
 def api_snapshot():
     cam = get_camera()
+    if cam is None:
+        return jsonify({"ok": False, "error": "camera_unavailable_in_serverless"})
     ret, frame = cam.read()
     if ret:
         frame = cv2.flip(frame, 1)
